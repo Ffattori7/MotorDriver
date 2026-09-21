@@ -1,49 +1,35 @@
 #include "controller.h"
+#include <math.h>
 
-
-// Proportional Position Controller - Revolutions (revs)
-int propCTRL(
-    float KP,
-    float setP_revs, 
-    float measP_revs) 
+int propCTRL(float KP, float setP_mm, float measP_mm)
 {
-    float err = setP_revs - measP_revs;
+    constexpr float STOP_ERROR_MM = 1.0f;
+    constexpr float RESTART_ERROR_MM = 2.0f;
 
-    const int PWM_MIN = 30;  // To be tuned
-    // const float PWM_ERR_MIN = 1.0f;  // Minimum error to apply PWM
+    constexpr int PWM_MIN = 30;
+    constexpr int PWM_MAX = 100;
 
-    // const int PWM_HOLD = 10;
-    // const float HOLD_ZONE = 0.2f;  // Error threshold for holding position
+    // State for this single motor controller.
+    static bool stopped = true;
 
-    // const float POS_DEADBAND = 0.20f;  // Deadband for position error in revolutions
+    float err = setP_mm - measP_mm;
+    float absErr = fabsf(err);
 
-    // // If close enough, do nothing (deadband)
-    // if (abs(err) < POS_DEADBAND) {
-    //     return 0;  // No PWM applied
-    // }
-
-    int pwm = static_cast<int>(KP * err);
-
-    // Min useful torque/PWM to overcome static friction
-    if (pwm > 0 && pwm < PWM_MIN) {
-        pwm = PWM_MIN;
+    if (stopped) {
+        if (absErr <= RESTART_ERROR_MM) {
+            return 0;
+        }
+        stopped = false;
+    } else if (absErr <= STOP_ERROR_MM) {
+        stopped = true;
+        return 0;
     }
 
-    if (pwm < 0 && pwm > -PWM_MIN) {
-        pwm = -PWM_MIN;
-    }
+    // Clamp in floating point before converting to int.
+    float effort = KP * absErr;
+    if (effort < PWM_MIN) effort = PWM_MIN;
+    if (effort > PWM_MAX) effort = PWM_MAX;
 
-    // // Stop completely if inside very small deadband
-    // if (abs(err) < 0.02f) {
-    //     pwm = 0;
-    // }
-
-    // Saturation
-    if (pwm > 130)
-        pwm = 130;
-        
-    if (pwm < -130) 
-        pwm = -130;
-
-    return pwm;
+    int pwm = static_cast<int>(effort);
+    return (err > 0.0f) ? pwm : -pwm;
 }

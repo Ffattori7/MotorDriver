@@ -6,15 +6,23 @@ const uint8_t ENC_B_PIN = 3;
 volatile long encoderCount = 0;
 const float COUNTS_PER_REV = 48.0f;  // Encoder resolution (48 counts per revolution)
 
+constexpr float GEAR_RATIO = 4.4f;
+constexpr float BELT_PITCH = 2.0f;  // [mm]
+constexpr int PULLEY_TEETH = 20;  // Number of teeth on the pulley
+
 // long prevCount = 0;
 // unsigned long prevTime = 0;
 static float sampleTime = 0.00f;  // [s]
 
 static float posRevs = 0.0f;
+static float shaftRevs = 0.0f;
+static float beltPos = 0.0f;  // [mm]
 static float velRevs = 0.0f;
 static float accRevs = 0.0f;
 
 static float prevPosRevs = 0.0f;
+static float prevShaftRevs = 0.0f;
+static float prevBeltPos = 0.0f;
 static float prevVelRevs = 0.0f;
 
 
@@ -82,10 +90,14 @@ void resetEncoderCount() {
     interrupts();    // Re-enable interrupts
 
     posRevs = 0.0f;
+    shaftRevs = 0.0f;
+    beltPos = 0.0f;
     velRevs = 0.0f;
     accRevs = 0.0f;
 
     prevPosRevs = 0.0f;
+    prevShaftRevs = 0.0f;
+    prevBeltPos = 0.0f;
     prevVelRevs = 0.0f;
 }
 
@@ -93,6 +105,10 @@ void encoderUpdate() {
     long count = getEncoderCount();
 
     posRevs = static_cast<float>(count) / COUNTS_PER_REV;
+
+    shaftRevs = posRevs / GEAR_RATIO;
+
+    beltPos = shaftRevs * PULLEY_TEETH * BELT_PITCH;
 
     velRevs = (posRevs - prevPosRevs) / sampleTime;
 
@@ -104,6 +120,14 @@ void encoderUpdate() {
 
 float getMotorRevs() {
     return posRevs;
+}
+
+float getShaftRevs() {
+    return shaftRevs;
+}
+
+float getBeltPos() {
+    return beltPos;
 }
 
 float getMotorSpeedRevs() {

@@ -6,20 +6,20 @@
 
 // Runtime
 uint32_t startTime = 0;
-const uint32_t MAX_RUNTIME_MS = 60000;  // 60 seconds
+const uint32_t MAX_RUNTIME_MS = 10000;  // 10 seconds
 
 // Setpoints - No Initial CMD
 float velRef = 0.0f;  // [mm/s]
 float posRef = 0.0f;  // [mm]
 
-// // Tolerance
-// const float POS_TOL = 5.00f;  // Position tolerance in mm
+// Tolerance
+const float POS_TOL = 1.00f;  // Position tolerance in mm
 
 // Proportional Gain
-const float KP = 5.0f;  // Adjust this value for tuning
+const float KP = 10.0f;  // Adjust this value for tuning
 
 // Current Limits
-const float CURRENT_LIMIT = 4.5f;  // [A]
+const float CURRENT_LIMIT = 1.4f;  // [A]
 float maxCurrent = 0.0f;            // [A]
 
 // Control Loop Frequency
@@ -90,10 +90,10 @@ void setup() {
         "time_ms,"
         "velocity_ref_rev_s,"
         "velocity_rev_s,"
-        "position_ref_mm,"
-        "position_mm,"
+        "position_ref_rev,"
+        "position_rev,"
         "encoder_count,"
-        "error_mm,"
+        "error_rev,"
         "pwm,"
         "speed_rpm,"
         "current_A,"

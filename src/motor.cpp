@@ -63,43 +63,43 @@ float getMotorCurrent() {
   return current;
 }
 
-void monitorFeedback(uint32_t duration_ms) {
-  uint32_t start_time = millis();
+// void monitorFeedback(uint32_t duration_ms) {
+//   uint32_t start_time = millis();
 
-  long sumADC = 0;
-  uint32_t nSamples = 0;
+//   long sumADC = 0;
+//   uint32_t nSamples = 0;
 
-  // encoderCount = 0;  // Reset encoder count at the start of monitoring
+//   // encoderCount = 0;  // Reset encoder count at the start of monitoring
   
-  while (millis() - start_time < duration_ms) {
-    sumADC += analogRead(FB_PIN);
-    nSamples++;
-    delay(100);  // Sample every 100 ms (10 Hz)
-  }
+//   while (millis() - start_time < duration_ms) {
+//     sumADC += analogRead(FB_PIN);
+//     nSamples++;
+//     delay(100);  // Sample every 100 ms (10 Hz)
+//   }
 
-  float avgADC = (float)sumADC / nSamples;
-  float voltage = (avgADC / 1023.0) * 5.0;  // Assuming a 10-bit ADC and 5V reference
-  float current = voltage / 0.525;  // Assuming a 525mV/A current sense amplifier
+//   float avgADC = (float)sumADC / nSamples;
+//   float voltage = (avgADC / 1023.0) * 5.0;  // Assuming a 10-bit ADC and 5V reference
+//   float current = voltage / 0.525;  // Assuming a 525mV/A current sense amplifier
 
-  Serial.println("===== Feedback Summary =====");
-  Serial.print("Samples: ");
-  Serial.println(nSamples);
+//   Serial.println("===== Feedback Summary =====");
+//   Serial.print("Samples: ");
+//   Serial.println(nSamples);
 
-  // Serial.print("PWM: ");
-  // Serial.println(PWM_TEST);
+//   // Serial.print("PWM: ");
+//   // Serial.println(PWM_TEST);
 
-  Serial.print("Average ADC: ");
-  Serial.println(avgADC, 1);
+//   Serial.print("Average ADC: ");
+//   Serial.println(avgADC, 1);
 
-  Serial.print("Average Voltage: ");
-  Serial.print(voltage, 3);
-  Serial.println(" V");
+//   Serial.print("Average Voltage: ");
+//   Serial.print(voltage, 3);
+//   Serial.println(" V");
 
-  Serial.print("Average Current: ");
-  Serial.print(current, 3);
-  Serial.println(" A");
+//   Serial.print("Average Current: ");
+//   Serial.print(current, 3);
+//   Serial.println(" A");
 
-  // Serial.print("Encoder Counts: ");
-  // Serial.println(encoderCount);
-  // Serial.println("============================");
-}
+//   // Serial.print("Encoder Counts: ");
+//   // Serial.println(encoderCount);
+//   // Serial.println("============================");
+// }
