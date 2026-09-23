@@ -4,6 +4,9 @@ const uint8_t ENC_A_PIN = 2;
 const uint8_t ENC_B_PIN = 3;
 
 volatile long encoderCount = 0;
+
+// Previous encoder AB state used by quadrature decoding
+static uint8_t lastState = 0;
 const float COUNTS_PER_REV = 48.0f;  // Encoder resolution (48 counts per revolution)
 
 constexpr float GEAR_RATIO = 4.4f;
@@ -28,9 +31,7 @@ static float prevVelRevs = 0.0f;
 
 // Interrupt Service Routine
 void encoderISR() 
-{   
-    static uint8_t lastState = 0;
-
+{  
     uint8_t A = digitalRead(ENC_A_PIN);
     uint8_t B = digitalRead(ENC_B_PIN);
 
@@ -62,6 +63,13 @@ void encoderInit(float ts) {
 
     pinMode(ENC_A_PIN, INPUT);
     pinMode(ENC_B_PIN, INPUT);
+
+    // Initialize quadrature decoder with the actual
+    // encoder state at startup
+    uint8_t A = digitalRead(ENC_A_PIN);
+    uint8_t B = digitalRead(ENC_B_PIN);
+
+    lastState = (A << 1) | B;
 
     // prevTime = millis();
 
