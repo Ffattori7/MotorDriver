@@ -1,391 +1,378 @@
 #include <Arduino.h>
 #include <math.h>
 #include <stdlib.h>
-#include <string.h>
-
+#include <ctype.h>
 #include "motor.h"
 #include "encoder.h"
 #include "controller.h"
 
 
-// =========================================================
-// Mechanical configuration
-// =========================================================
+// Runtime
+uint32_t startTime = 0;
+const uint32_t MAX_RUNTIME_MS = 60000;  // 60 seconds after setup
 
-// Must correspond to ROS l_max = 0.4825 m
-constexpr float SLIDER_TRAVEL_MM = 482.5f;
+// Serial commands are absolute belt targets relative to startup zero [mm].
+// This speed sets the reference ramp, not a closed-loop velocity command.
+constexpr float MOTION_SPEED_MM_S = 300.0f;
+float targetPos = 0.0f;  // Serial destination [mm]
+float posRef = 0.0f;     // Integrated tracking reference [mm]
+float velRef = 0.0f;     // Signed reference velocity [mm/s]
 
+// Tunable gains, velocity filter and final holding thresholds: controller.h.
+// kv defaults to zero until PWM-versus-speed is measured under the actual load.
+const MotionControlConfig controlConfig;
+MotionController controlState;
+float previousPosition = 0.0f;
+bool havePositionSample = false;
 
-// =========================================================
-// Controller
-// =========================================================
+// Current Limits
+const float CURRENT_LIMIT = 5.0f;  // [A]
+float maxCurrent = 0.0f;            // [A]
 
-constexpr float KP = 5.0f;
+// Control Loop Frequency
+const float TS = 0.020f;  // 20 ms = 50 Hz
 
-// Current safety limit
-constexpr float CURRENT_LIMIT = 4.5f;  // [A]
+const uint32_t LOOP_PERIOD_US = 20000;  // 20 ms = 50 Hz
+uint32_t next_loopTime = 0;
+uint32_t prev_loopTime = 0;
+bool firstLoop = true;
 
-// Control loop
-constexpr float TS = 0.020f;                 // [s]
-constexpr uint32_t LOOP_PERIOD_US = 20000;  // 50 Hz
+// Serial Buffer: ignore malformed or overlong commands as a whole.
+char posBuffer[32];
+uint8_t posBuffer_idx = 0;
+bool posBufferOverflow = false;
 
-
-// =========================================================
-// ROS / Serial interface
-// =========================================================
-
-// ROS sends:
-//      0.000\n
-//      0.500\n
-//      1.000\n
-//
-// Arduino sends:
-//      POS,0.497\n
-//
-// ROS can also send:
-//      STOP\n
-
-constexpr uint32_t FEEDBACK_PERIOD_MS = 50;  // 20 Hz
-
-char serialBuffer[32];
-uint8_t serialBufferIdx = 0;
-bool discardSerialLine = false;
-
-
-// =========================================================
-// State
-// =========================================================
-
-// Normalized command received from ROS [0,1]
-float positionCmdNorm = 0.0f;
-
-// Physical controller reference [mm]
-float posRef = 0.0f;
-
-// Actuator state
-bool motionEnabled = false;
-
-// Latched current fault.
-// Once triggered, reboot/reset is currently required.
-bool currentFault = false;
-
-
-// =========================================================
-// Scheduler
-// =========================================================
-
-uint32_t nextLoopTime = 0;
-uint32_t lastFeedbackTime = 0;
-
-
-// =========================================================
-// Conversion functions
-// =========================================================
-
-float normalizedToBeltPos(float normalized)
-{
-    if (normalized < 0.0f) normalized = 0.0f;
-    if (normalized > 1.0f) normalized = 1.0f;
-
-    return normalized * SLIDER_TRAVEL_MM;
-}
-
-
-float beltPosToNormalized(float pos_mm)
-{
-    float normalized = pos_mm / SLIDER_TRAVEL_MM;
-
-    // ROS driver expects feedback within [0,1].
-    // Clamp small overshoots caused by controller dynamics.
-    if (normalized < 0.0f) normalized = 0.0f;
-    if (normalized > 1.0f) normalized = 1.0f;
-
-    return normalized;
-}
-
-
-// =========================================================
-// Position command
-// =========================================================
-
-void applyPositionCommand(float normalized)
-{
-    // Reject commands outside the ROS interface definition.
-    if (normalized < 0.0f || normalized > 1.0f) {
-        return;
-    }
-
-    // Do not automatically restart after a safety fault.
-    if (currentFault) {
-        return;
-    }
-
-    positionCmdNorm = normalized;
-
-    // Convert ROS normalized coordinate to the physical
-    // quantity already used by your controller.
-    posRef = normalizedToBeltPos(positionCmdNorm);
-
-    // Enable actuator
-    driverEnable();
-    motionEnabled = true;
-}
-
-
-// =========================================================
-// STOP command
-// =========================================================
-
-void stopFromCommand()
-{
-    motorStop();
-    shutdown();
-
-    motionEnabled = false;
-}
-
-
-// =========================================================
-// Serial command processing
-// =========================================================
-
-void processSerialLine(char *line)
-{
-    // -------------------------
-    // STOP command
-    // -------------------------
-    if (strcmp(line, "STOP") == 0) {
-        stopFromCommand();
-        return;
-    }
-
-    // -------------------------
-    // Position command
-    // -------------------------
-
-    char *endPtr = nullptr;
-
-    // float command = strtof(line, &endPtr);
-    float command = static_cast<float>(strtod(line, &endPtr));
-
-    // strtof() must actually have found a number
-    if (endPtr == line) {
-        return;
-    }
-
-    // Allow trailing spaces/tabs
-    while (*endPtr == ' ' || *endPtr == '\t') {
-        endPtr++;
-    }
-
-    // Reject strings such as:
-    //
-    // 0.5abc
-    //
-    if (*endPtr != '\0') {
-        return;
-    }
-
-    // Reject NaN / Inf
-    if (isnan(command) || isinf(command)) {
-        return;
-    }
-
-    // Valid normalized position
-    if (command >= 0.0f && command <= 1.0f) {
-        applyPositionCommand(command);
-    }
-}
-
-
-void readSerialCommands()
-{
+void readPosRef() {
     while (Serial.available() > 0) {
-
         char c = Serial.read();
-
-        // End of command
         if (c == '\n' || c == '\r') {
-
-            // End discard mode at the end of the corrupted line
-            if (discardSerialLine) {
-                discardSerialLine = false;
-                serialBufferIdx = 0;
-                continue;
+            if (posBuffer_idx > 0 && !posBufferOverflow) {
+                posBuffer[posBuffer_idx] = '\0';
+                char *end = nullptr;
+                float value = strtod(posBuffer, &end);
+                bool hasNumber = end != posBuffer;
+                while (isspace(static_cast<unsigned char>(*end))) ++end;
+                if (hasNumber && *end == '\0' && isfinite(value)) {
+                    targetPos = value;
+                }
             }
-
-            if (serialBufferIdx > 0) {
-
-                serialBuffer[serialBufferIdx] = '\0';
-
-                processSerialLine(serialBuffer);
-
-                serialBufferIdx = 0;
-            }
-        }
-
-        // Ignore everything until EOL after buffer overflow
-        else if (discardSerialLine) {
-            continue;
-        }
-
-        // Store character
-        else if (serialBufferIdx < sizeof(serialBuffer) - 1) {
-
-            serialBuffer[serialBufferIdx++] = c;
-        }
-
-        // Buffer overflow:
-        // reject the complete command
-        else {
-
-            serialBufferIdx = 0;
-            discardSerialLine = true;
+            posBuffer_idx = 0;
+            posBufferOverflow = false;
+        } else if (posBuffer_idx < sizeof(posBuffer) - 1) {
+            posBuffer[posBuffer_idx++] = c;
+        } else {
+            posBufferOverflow = true;
         }
     }
 }
 
-
-// =========================================================
-// ROS feedback
-// =========================================================
-
-void sendPositionFeedback(float pos_mm)
-{
-    float normalized = beltPosToNormalized(pos_mm);
-
-    Serial.print("POS,");
-    Serial.println(normalized, 4);
+void updatePositionReference(float dt) {
+    float remaining = targetPos - posRef;
+    float maxStep = MOTION_SPEED_MM_S * dt;
+    float step = remaining;
+    if (step > maxStep) step = maxStep;
+    if (step < -maxStep) step = -maxStep;
+    if (fabsf(remaining) <= maxStep) {
+        posRef = targetPos;  // Land exactly on the destination without overshoot.
+    } else {
+        posRef += step;
+    }
+    velRef = step / dt;
 }
 
-
-// =========================================================
+// ---------------------------------------------------------
 // Setup
-// =========================================================
+// ---------------------------------------------------------
 
-void setup()
-{
+void setup() {
     Serial.begin(115200);
 
     motorInit();
     encoderInit(TS);
 
-    // Always start with actuator disabled.
-    motorStop();
+    // Start Disabled
     shutdown();
+    motorStop();
+    delay(1000);
 
-    // IMPORTANT:
-    // This defines the CURRENT physical slider position
-    // as x = 0 mm.
+    // Reset encoder count
     resetEncoderCount();
 
+    // Wake Driver
+    // Serial.println("Enabling Driver");
+    driverEnable();
+    delay(3000);
+
+    // Record start time
+    startTime = millis();
+
     uint32_t now = micros();
+    next_loopTime = now;
+    prev_loopTime = now;
 
-    nextLoopTime = now + LOOP_PERIOD_US;
-
-    lastFeedbackTime = millis();
+    // Print CSV Header
+    Serial.println(
+        "time_ms,"
+        "velocity_ref_mm_s,"
+        "velocity_rev_s,"
+        "position_ref_mm,"
+        "position_mm,"
+        "encoder_count,"
+        "error_mm,"
+        "pwm,"
+        "speed_rpm,"
+        "current_A,"
+        "maxCurrent_A,"
+        "loop_period_us,"
+        "loop_exe_us,"
+        "tracking_ref_mm,"
+        "tracking_error_mm,"
+        "velocity_mm_s,"
+        "filtered_velocity_mm_s,"
+        "holding");
 }
 
-
-// =========================================================
+// ---------------------------------------------------------
 // Main loop
-// =========================================================
+// ---------------------------------------------------------
 
-void loop()
-{
-    // Read serial continuously.
-    //
-    // In particular, STOP does not need to wait for the
-    // next complete control calculation.
-    readSerialCommands();
-
-
-    // -----------------------------------------------------
-    // 50 Hz scheduler
-    // -----------------------------------------------------
-
+void loop() {
     uint32_t now = micros();
 
-    if ((int32_t)(now - nextLoopTime) < 0) {
+    // 50 Hz scheduler
+
+    if ((int32_t)(now - next_loopTime) < 0) {
         return;
     }
 
-    nextLoopTime += LOOP_PERIOD_US;
+    uint32_t loopPeriod = 0;
+    
+    if (!firstLoop) {
+        loopPeriod = now - prev_loopTime;
+    }
 
+    prev_loopTime = now;
+    firstLoop = false;
+    next_loopTime += LOOP_PERIOD_US;
+    // Do not execute rapid catch-up iterations after an overrun.
+    if ((int32_t)(now - next_loopTime) >= 0) next_loopTime = now + LOOP_PERIOD_US;
+    const float dt = loopPeriod > 0 ? loopPeriod * 1.0e-6f : TS;
 
-    // -----------------------------------------------------
-    // Encoder feedback
-    // -----------------------------------------------------
+    // Start execution-time measurement
+    uint32_t loopStart = micros();
 
+    // Ramp continuously from the previous reference, including on retargeting.
+    readPosRef();
+    updatePositionReference(dt);
+
+    // Update encoder feedback
     encoderUpdate();
 
+    // Read feedback
     float pos = getBeltPos();
+    long encoderCount = getEncoderCount();
+    float err = targetPos - pos;  // Destination error for tracking evaluation
+    float vel = getMotorSpeedRevs();
+    float speedRPM = getMotorSpeedRPM();
+    // Derive belt velocity from the existing mm position API and actual elapsed time.
+    float beltVelocity = havePositionSample ? (pos - previousPosition) / dt : 0.0f;
+    previousPosition = pos;
+    havePositionSample = true;
 
+    float current = getMotorCurrent();
+    if (current > maxCurrent) {
+        maxCurrent = current;
+    }
 
-    // -----------------------------------------------------
-    // Motor control
-    // -----------------------------------------------------
+    // Current Hard Stop
+    if (current >= CURRENT_LIMIT) {
+        motorStop();
 
-    if (motionEnabled && !currentFault) {
+        uint32_t elapsed = millis() - startTime;
 
-        float current = getMotorCurrent();
+        Serial.print(elapsed);
+        Serial.print(",");
 
+        Serial.print(velRef, 3);
+        Serial.print(",");
 
-        // -------------------------------------------------
-        // Current hard stop
-        // -------------------------------------------------
+        Serial.print(vel, 3);
+        Serial.print(",");
 
-        if (current >= CURRENT_LIMIT) {
+        Serial.print(targetPos, 3);
+        Serial.print(",");
 
-            motorStop();
-            shutdown();
+        Serial.print(pos, 3);
+        Serial.print(",");
 
-            motionEnabled = false;
-            currentFault = true;
-        }
+        Serial.print(encoderCount);
+        Serial.print(",");
 
-        // -------------------------------------------------
-        // Position controller
-        // -------------------------------------------------
+        Serial.print(err, 3);
+        Serial.print(",");
 
-        else {
+        Serial.print(0);
+        Serial.print(",");
 
-            int pwm = propCTRL(
-                KP,
-                posRef,
-                pos);
+        Serial.print(speedRPM, 1);
+        Serial.print(",");
 
-            if (pwm > 0) {
+        Serial.print(current, 3);
+        Serial.print(",");
 
-                motorForward(pwm);
-            }
-            else if (pwm < 0) {
+        Serial.print(maxCurrent, 3);
+        Serial.print(",");
 
-                motorReverse(-pwm);
-            }
-            else {
+        Serial.print(loopPeriod);
+        Serial.print(",");
 
-                motorStop();
-            }
+        Serial.print(micros() - loopStart);
+        Serial.print(",");
+        Serial.print(posRef, 3);
+        Serial.print(",");
+        Serial.print(posRef - pos, 3);
+        Serial.print(",");
+        Serial.print(beltVelocity, 3);
+        Serial.print(",");
+        Serial.print(controlState.filteredVelocity, 3);
+        Serial.print(",");
+        Serial.println(controlState.holding ? 1 : 0);
+
+        shutdown();
+
+        while (true)
+        {
+            // Hard stop: remain stopped
         }
     }
 
-    else {
 
+    // Reference still uses constant speed: no acceleration profile introduced.
+    const bool referenceMoving = fabsf(velRef) > 0.001f || posRef != targetPos;
+    int pwm = motionCTRL(controlState, controlConfig, posRef, velRef,
+                         pos, beltVelocity, dt, referenceMoving);
+
+    // Motor direction
+    if (pwm > 0) {
+        motorForward(pwm);
+    } else if (pwm < 0) {
+        motorReverse(-pwm);
+    } else {
         motorStop();
     }
 
+    // Measure control loop execution time
+    uint32_t loopExeTime = micros() - loopStart;
 
-    // -----------------------------------------------------
-    // Periodic ROS feedback
-    // -----------------------------------------------------
+    // Stop condition -  Maximum test time exceeded
+    if (millis() - startTime >= MAX_RUNTIME_MS)
+    {
+        motorStop();
 
-    uint32_t nowMs = millis();
+        Serial.print(millis() - startTime);
+        Serial.print(",");
 
-    if (nowMs - lastFeedbackTime >= FEEDBACK_PERIOD_MS) {
+        Serial.print(velRef,3);
+        Serial.print(",");
 
-        lastFeedbackTime = nowMs;
+        Serial.print(vel,3);
+        Serial.print(",");
 
-        sendPositionFeedback(pos);
+        Serial.print(targetPos,3);
+        Serial.print(",");
+
+        Serial.print(pos,3);
+        Serial.print(",");
+
+        Serial.print(encoderCount);
+        Serial.print(",");
+
+        Serial.print(err,3);
+        Serial.print(",");
+
+        // Serial.print(pwm);
+        Serial.print("0,");
+
+        Serial.print(speedRPM,1);
+        Serial.print(",");
+
+        Serial.print(current, 3);
+        Serial.print(",");
+
+        Serial.print(maxCurrent, 3);
+        Serial.print(",");
+
+        Serial.print(loopPeriod);
+        Serial.print(",");
+
+        Serial.print(loopExeTime);
+        Serial.print(",");
+        Serial.print(posRef, 3);
+        Serial.print(",");
+        Serial.print(posRef - pos, 3);
+        Serial.print(",");
+        Serial.print(beltVelocity, 3);
+        Serial.print(",");
+        Serial.print(controlState.filteredVelocity, 3);
+        Serial.print(",");
+        Serial.println(controlState.holding ? 1 : 0);
+
+        shutdown();
+
+        while (true)
+        {
+            // Stay here forever
+        }
     }
+
+    // Print Feedback CSV-like
+    Serial.print(millis() - startTime);
+    Serial.print(",");
+
+    Serial.print(velRef,3);
+    Serial.print(",");
+
+    Serial.print(vel,3);
+    Serial.print(",");
+
+    Serial.print(targetPos,3);
+    Serial.print(",");
+
+    Serial.print(pos,3);
+    Serial.print(",");
+
+    Serial.print(encoderCount);
+    Serial.print(",");
+
+    Serial.print(err,3);
+    Serial.print(",");
+
+    Serial.print(pwm);
+    Serial.print(",");
+
+    Serial.print(speedRPM,1);
+    Serial.print(",");
+
+    Serial.print(current, 3);
+    Serial.print(",");
+
+    Serial.print(maxCurrent, 3);
+    Serial.print(",");
+
+    Serial.print(loopPeriod);
+    Serial.print(",");
+
+    Serial.print(loopExeTime);
+    Serial.print(",");
+    Serial.print(posRef, 3);
+    Serial.print(",");
+    Serial.print(posRef - pos, 3);
+        Serial.print(",");
+        Serial.print(beltVelocity, 3);
+        Serial.print(",");
+        Serial.print(controlState.filteredVelocity, 3);
+        Serial.print(",");
+        Serial.println(controlState.holding ? 1 : 0);
+
+    // delay(20);  // 50 Hz control loop
 }

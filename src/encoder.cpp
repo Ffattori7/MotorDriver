@@ -45,13 +45,13 @@ void encoderISR()
         case 0b0111:
         case 0b1110:
         case 0b1000:
-            encoderCount++;
+            encoderCount--;
             break;
         case 0b0010:
         case 0b0100:
         case 0b1101:
         case 0b1011:
-            encoderCount--;
+            encoderCount++;
             break;
     }
 
